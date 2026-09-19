@@ -27,6 +27,7 @@
   <header id="hdr">
     <span class="logo">Dark<span class="logo-b">MSG</span></span>
     <span id="hdr-status" class="st-off"><i class="led"></i><span id="hdr-status-txt">OFFLINE</span></span>
+    <button id="btn-xfer" type="button" aria-label="File transfer" hidden>[XFER]</button>
     <button id="btn-settings" type="button" aria-label="Settings" hidden>[≡]</button>
   </header>
 
@@ -64,18 +65,41 @@
 
   <!-- TERMINAL -->
   <section id="scr-term" class="screen">
-    <div id="hs" class="hs">
-      <span class="step" data-step="syn">SYN</span><span class="arrow">&gt;&gt;&gt;</span>
-      <span class="step" data-step="synack">SYN/ACK</span><span class="arrow">&lt;&lt;&lt;</span>
-      <span class="step" data-step="ack">ACK</span><span class="arrow">&gt;&gt;&gt;</span>
-      <span class="step" data-step="linked">LINK</span>
+    <div id="chat-col" class="col">
+      <div id="hs" class="hs">
+        <span class="step" data-step="syn">SYN</span><span class="arrow">&gt;&gt;&gt;</span>
+        <span class="step" data-step="synack">SYN/ACK</span><span class="arrow">&lt;&lt;&lt;</span>
+        <span class="step" data-step="ack">ACK</span><span class="arrow">&gt;&gt;&gt;</span>
+        <span class="step" data-step="linked">LINK</span>
+      </div>
+      <div id="msgs" class="log" aria-live="polite"></div>
+      <form id="form-send" autocomplete="off">
+        <span class="ps">&gt;</span>
+        <input id="msg-input" type="text" placeholder="waiting for peer..." autocomplete="off" autocorrect="on" autocapitalize="sentences" enterkeyhint="send" maxlength="4000" disabled>
+        <button id="btn-send" type="submit" disabled>SEND</button>
+      </form>
     </div>
-    <div id="msgs" class="log" aria-live="polite"></div>
-    <form id="form-send" autocomplete="off">
-      <span class="ps">&gt;</span>
-      <input id="msg-input" type="text" placeholder="waiting for peer..." autocomplete="off" autocorrect="on" autocapitalize="sentences" enterkeyhint="send" maxlength="4000" disabled>
-      <button id="btn-send" type="submit" disabled>SEND</button>
-    </form>
+
+    <div id="xfer-col" class="col">
+      <div class="xfer-hd">// FILE XFER — BITTORRENT OVER WEBRTC — PEER TO PEER, ENCRYPTED</div>
+      <div class="xfer-actions">
+        <button id="btn-pick-folder" type="button">[ SHARE FOLDER ]</button>
+        <button id="btn-pick-files" type="button">[ SHARE FILES ]</button>
+        <input id="pick-folder" type="file" webkitdirectory multiple hidden>
+        <input id="pick-files" type="file" multiple hidden>
+      </div>
+      <div class="log xfer-log">
+        <div class="xfer-sec">
+          <div class="xfer-sec-hd">LOCAL SHARES (seeding from this machine)</div>
+          <div id="local-shares" class="share-list"></div>
+        </div>
+        <div class="xfer-sec">
+          <div class="xfer-sec-hd">PEER SHARES (available to download)</div>
+          <div id="remote-shares" class="share-list"></div>
+        </div>
+        <div id="xfer-status" class="dim small">Files are chunked, AES-256 encrypted, then seeded as a torrent. Only your peer receives the key. Transfers run computer to computer over WebRTC; keep this tab open while seeding.</div>
+      </div>
+    </div>
   </section>
 
   <!-- SETTINGS DRAWER -->
@@ -103,7 +127,7 @@
         <button id="btn-wipe" type="button" class="warn">[ WIPE HISTORY ]</button>
         <button id="btn-logout" type="button" class="warn">[ LOGOUT ]</button>
       </div>
-      <p class="dim small">v1.0 // AES-256-GCM // ECDH P-256 // PBKDF2-SHA256</p>
+      <p class="dim small">v1.1 // AES-256-GCM // ECDH P-256 // PBKDF2-SHA256 // WEBTORRENT</p>
     </div>
   </aside>
 </div>

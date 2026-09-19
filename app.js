@@ -342,6 +342,14 @@ async function handleRoom(p) {
   }
   notePeer(p.id);
   if ((p.t === 'syn' || p.t === 'synack') && p.pub && S.eph) {
+    // pairing lock: while a link is healthy, a different client cannot hijack it
+    if (S.linked && S.peerId && p.id !== S.peerId && now() - S.lastPeerSeen < PEER_TIMEOUT_MS) {
+      if (now() - (S.lastExtraWarn || 0) > 30000) {
+        S.lastExtraWarn = now();
+        sys(`EXTRA CLIENT ${p.id.slice(0, 6)} TRIED TO JOIN. CHANNEL IS TWO-PARTY; IGNORED.`, 'warn');
+      }
+      return;
+    }
     let key;
     try { key = await deriveSession(S.eph.priv, p.pub, S.myId, p.id); }
     catch (e) { sys('KEY EXCHANGE FAILED', 'err'); return; }
@@ -368,6 +376,7 @@ function handleSess(p) {
     case 'ack':  setLinked(); break;
     case 'ping': if (!S.linked) setLinked(); break;
     case 'msg':  if (typeof p.text === 'string') { addMsg('in', p.text, p.ts); notifyIncoming(); } break;
+    case 'shares': onRemoteShares(p.list); break;
     default: break;
   }
 }
@@ -379,6 +388,7 @@ function setLinked(quiet) {
   setInputEnabled(true);
   if (!quiet) { sys('*** LINK ESTABLISHED. CHANNEL SECURE. ***', 'ok'); beep(660, 60); setTimeout(() => beep(990, 90), 80); }
   else sys('SESSION RE-KEYED', 'dim');
+  setTimeout(announceShares, 300);
 }
 function linkLost(reason, resyn) {
   const had = S.linked || S.sessionKey;
@@ -436,6 +446,257 @@ if (window.visualViewport) {
   vv.addEventListener('resize', fit);
   vv.addEventListener('scroll', fit);
 }
+
+/* ------------------------------------------------------------------ */
+/* file transfer: BitTorrent over WebRTC (WebTorrent), encrypted files */
+/* ------------------------------------------------------------------ */
+const WT_URL   = 'https://cdn.jsdelivr.net/npm/webtorrent@2.8.4/dist/webtorrent.min.js';
+const TRACKERS = [
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.webtorrent.dev',
+];
+const RTC_CONFIG = { iceServers: [
+  { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+  { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turns:openrelay.metered.ca:443'],
+    username: 'openrelayproject', credential: 'openrelayproject' },
+] };
+const XFER_CHUNK     = 4 * 1024 * 1024;   // plaintext bytes per AES-GCM chunk
+const XFER_MAX_FILES = 2000;              // per share (announcement must fit one MQTT packet)
+const X = { wt: null, loading: null, local: new Map(), remote: new Map(), torrents: new Map(), dl: new Map() };
+const ex = {
+  col: $('#xfer-col'), btnXfer: $('#btn-xfer'), pickFolder: $('#pick-folder'), pickFiles: $('#pick-files'),
+  btnPickFolder: $('#btn-pick-folder'), btnPickFiles: $('#btn-pick-files'),
+  local: $('#local-shares'), remote: $('#remote-shares'), status: $('#xfer-status'),
+};
+const fmtBytes = (n) => {
+  if (!(n >= 0)) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + ' ' + u[i];
+};
+const dlKey = (sid, fi) => sid + ':' + fi;
+const whenReady = (t) => (t.ready ? Promise.resolve() : new Promise((r) => t.once('ready', r)));
+
+function loadWT() {
+  if (window.WebTorrent) return Promise.resolve();
+  if (!X.loading) X.loading = import(WT_URL)
+    .then((m) => { window.WebTorrent = m.default || m.WebTorrent; })
+    .catch((e) => { X.loading = null; throw new Error('WebTorrent failed to load: ' + (e.message || e)); });
+  return X.loading;
+}
+async function ensureWT() {
+  await loadWT();
+  if (!X.wt) {
+    X.wt = new WebTorrent({ tracker: { announce: TRACKERS, rtcConfig: RTC_CONFIG } });
+    X.wt.on('error', (e) => sys('TORRENT ENGINE: ' + (e && e.message ? e.message : e), 'err'));
+  }
+  return X.wt;
+}
+
+/* chunked AES-GCM: [iv(12) | ct(len+16)] repeated */
+async function encryptFile(file, key) {
+  const parts = [];
+  for (let off = 0; ; off += XFER_CHUNK) {
+    const buf = await file.slice(off, off + XFER_CHUNK).arrayBuffer();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    parts.push(iv, await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, buf));
+    if (off + XFER_CHUNK >= file.size) break;
+  }
+  return new Blob(parts, { type: 'application/octet-stream' });
+}
+async function decryptBlob(blob, key, plainSize) {
+  const parts = []; let pos = 0, done = 0;
+  while (pos < blob.size) {
+    const ptLen = Math.min(XFER_CHUNK, plainSize - done);
+    const encLen = 12 + ptLen + 16;
+    const u = new Uint8Array(await blob.slice(pos, pos + encLen).arrayBuffer());
+    parts.push(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: u.slice(0, 12) }, key, u.slice(12)));
+    pos += encLen; done += ptLen;
+    if (ptLen === 0) break;
+  }
+  return new Blob(parts);
+}
+
+/* ---- seeding ---- */
+async function shareFiles(fileList, label) {
+  const files = Array.from(fileList).filter((f) => !f.name.startsWith('.'));
+  if (!files.length) { sys('NOTHING TO SHARE.', 'warn'); return; }
+  if (files.length > XFER_MAX_FILES) { sys(`TOO MANY FILES (${files.length}). LIMIT ${XFER_MAX_FILES} PER SHARE.`, 'err'); return; }
+  const id = randId();
+  const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+  const keyB64 = b64enc(await crypto.subtle.exportKey('raw', key));
+  const share = { id, name: label, keyB64, files: [], total: 0, torrent: null, infoHash: null, status: 'LOADING ENGINE' };
+  X.local.set(id, share); renderLocal();
+  try {
+    const wt = await ensureWT();
+    const blobs = [];
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      share.status = `ENCRYPTING ${i + 1}/${files.length}`; renderLocal();
+      const enc = await encryptFile(f, key);
+      blobs.push(new File([enc], i + '.bin', { type: 'application/octet-stream' }));
+      share.files.push({ i, path: f.webkitRelativePath || f.name, size: f.size });
+      share.total += f.size;
+    }
+    share.status = 'HASHING'; renderLocal();
+    wt.seed(blobs, { name: 'dm-' + id, announce: TRACKERS }, (torrent) => {
+      share.torrent = torrent; share.infoHash = torrent.infoHash; share.status = 'SEEDING';
+      X.torrents.set(torrent.infoHash, torrent);
+      torrent.on('wire', renderLocal);
+      torrent.on('error', (e) => sys('SEED ERROR: ' + (e.message || e), 'err'));
+      renderLocal(); announceShares();
+      sys(`SHARING "${label}" (${files.length} file(s), ${fmtBytes(share.total)}) VIA BITTORRENT`, 'ok');
+    });
+  } catch (e) {
+    X.local.delete(id); renderLocal();
+    sys('SHARE FAILED: ' + (e.message || e), 'err');
+  }
+}
+function removeShare(id) {
+  const share = X.local.get(id); if (!share) return;
+  X.local.delete(id);
+  if (share.torrent) { X.torrents.delete(share.infoHash); try { X.wt.remove(share.torrent); } catch (e) { /* ignore */ } }
+  renderLocal(); announceShares();
+  sys(`STOPPED SHARING "${share.name}"`, 'dim');
+}
+function announceShares() {
+  if (!S.linked) return;
+  const list = Array.from(X.local.values()).filter((sh) => sh.infoHash).map((sh) => ({
+    id: sh.id, name: sh.name, infoHash: sh.infoHash, key: sh.keyB64, total: sh.total, files: sh.files,
+  }));
+  sendSess({ t: 'shares', list });
+}
+function onRemoteShares(list) {
+  if (!Array.isArray(list)) return;
+  const before = Array.from(X.remote.keys()).join(',');
+  X.remote.clear();
+  for (const sh of list) {
+    if (!sh || typeof sh.id !== 'string' || !/^[0-9a-f]{40}$/.test(sh.infoHash || '') || !Array.isArray(sh.files)) continue;
+    X.remote.set(sh.id, {
+      id: sh.id, name: String(sh.name || sh.id), infoHash: sh.infoHash, key: String(sh.key || ''), total: +sh.total || 0,
+      files: sh.files.filter((f) => f && Number.isInteger(f.i)).map((f) => ({ i: f.i, path: String(f.path || f.i), size: +f.size || 0 })),
+    });
+  }
+  renderRemote();
+  const after = Array.from(X.remote.keys()).join(',');
+  if (after && after !== before) sys(`PEER IS SHARING ${X.remote.size} ITEM(S). OPEN [XFER] TO DOWNLOAD.`, 'ok');
+}
+
+/* ---- downloading ---- */
+async function getRemoteFile(sid, fi) {
+  const share = X.remote.get(sid); if (!share) return;
+  const f = share.files.find((x) => x.i === fi); if (!f) return;
+  const k = dlKey(sid, fi);
+  if (X.dl.has(k) && X.dl.get(k).status !== 'FAILED') return;
+  const st = { sid, fi, name: f.path.split('/').pop() || 'file', size: f.size, status: 'CONNECTING', progress: 0, url: null, tfile: null, err: '' };
+  X.dl.set(k, st); renderRemote();
+  try {
+    const wt = await ensureWT();
+    const key = await crypto.subtle.importKey('raw', b64dec(share.key), { name: 'AES-GCM' }, false, ['decrypt']);
+    let torrent = X.torrents.get(share.infoHash);
+    if (!torrent) {
+      torrent = wt.add(share.infoHash, { announce: TRACKERS });
+      X.torrents.set(share.infoHash, torrent);
+      torrent.on('error', (e) => sys('TORRENT: ' + (e.message || e), 'err'));
+      await whenReady(torrent);
+      torrent.deselect(0, torrent.pieces.length - 1, false);
+    } else {
+      await whenReady(torrent);
+    }
+    // multi-file torrents keep our 0.bin/1.bin names; a single-file torrent is named after the torrent itself
+    let tf = torrent.files.find((x) => x.name === fi + '.bin');
+    if (!tf && torrent.files.length === 1 && fi === 0) tf = torrent.files[0];
+    if (!tf) throw new Error('file not in torrent');
+    st.tfile = tf; st.status = 'DOWNLOADING'; renderRemote();
+    tf.select();
+    if (!tf.done) await new Promise((r) => tf.once('done', r));
+    st.status = 'DECRYPTING'; st.progress = 1; renderRemote();
+    const dec = await decryptBlob(await tf.blob(), key, f.size);
+    if (dec.size !== f.size) throw new Error('size mismatch after decrypt');
+    st.url = URL.createObjectURL(dec); st.status = 'READY'; renderRemote();
+    sys(`RECEIVED "${st.name}" (${fmtBytes(dec.size)}). TAP [SAVE] IN XFER IF IT DID NOT AUTO-SAVE.`, 'ok');
+    autoSave(st);
+  } catch (e) {
+    st.status = 'FAILED'; st.err = e && e.message ? e.message : String(e); renderRemote();
+    sys(`DOWNLOAD FAILED: ${st.name}: ${st.err}`, 'err');
+  }
+}
+function autoSave(st) {
+  try { const a = document.createElement('a'); a.href = st.url; a.download = st.name; document.body.appendChild(a); a.click(); a.remove(); }
+  catch (e) { /* user taps SAVE */ }
+}
+
+/* ---- rendering ---- */
+function shareMeta(share, isLocal) {
+  const t = share.torrent || X.torrents.get(share.infoHash);
+  let m = `${share.files.length} file(s) · ${fmtBytes(share.total)}`;
+  if (isLocal) m += ` · ${share.status}` + (t ? ` · peers ${t.numPeers} · up ${fmtBytes(t.uploadSpeed)}/s` : '');
+  else if (t) m += ` · peers ${t.numPeers} · down ${fmtBytes(t.downloadSpeed)}/s`;
+  return m;
+}
+function dlText(st) {
+  if (st.status === 'DOWNLOADING' && st.tfile) { st.progress = st.tfile.progress || 0; return `${Math.round(st.progress * 100)}%`; }
+  return st.status;
+}
+function mk(tag, cls, text) { const n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
+function shareRow(share, isLocal) {
+  const box = mk('div', 'share');
+  const hd = mk('div', 'share-hd');
+  hd.append(mk('span', 'share-name', (share.files.length > 1 ? '[DIR] ' : '[FILE] ') + share.name));
+  const meta = mk('span', 'share-meta', shareMeta(share, isLocal)); meta.dataset.share = share.id; hd.appendChild(meta);
+  if (isLocal) { const rm = mk('button', 'mini', '[X]'); rm.type = 'button'; rm.title = 'stop sharing'; rm.onclick = () => removeShare(share.id); hd.appendChild(rm); }
+  box.appendChild(hd);
+  const list = mk('div', 'share-files');
+  for (const f of share.files) {
+    const row = mk('div', 'frow');
+    row.append(mk('span', 'fpath', f.path), mk('span', 'fsize', fmtBytes(f.size)));
+    if (!isLocal) {
+      const k = dlKey(share.id, f.i); const st = X.dl.get(k);
+      if (!st || st.status === 'FAILED') {
+        const b = mk('button', 'mini', st ? '[RETRY]' : '[GET]'); b.type = 'button'; b.onclick = () => getRemoteFile(share.id, f.i); row.appendChild(b);
+        if (st) row.appendChild(mk('span', 'ferr', st.err));
+      } else if (st.status === 'READY') {
+        const a = mk('a', 'mini', '[SAVE]'); a.href = st.url; a.download = st.name; row.appendChild(a);
+      } else {
+        const pr = mk('span', 'fprog', dlText(st)); pr.dataset.dl = k; row.appendChild(pr);
+        const bar = mk('div', 'bar'); const i = mk('i'); i.dataset.bar = k; i.style.width = Math.round(st.progress * 100) + '%'; bar.appendChild(i); row.appendChild(bar);
+      }
+    }
+    list.appendChild(row);
+  }
+  box.appendChild(list);
+  return box;
+}
+function renderLocal()  { ex.local.textContent = '';  for (const sh of X.local.values())  ex.local.appendChild(shareRow(sh, true)); }
+function renderRemote() { ex.remote.textContent = ''; for (const sh of X.remote.values()) ex.remote.appendChild(shareRow(sh, false)); }
+function xferTick() {
+  if (!X.local.size && !X.remote.size) return;
+  for (const m of ex.col.querySelectorAll('[data-share]')) {
+    const l = X.local.get(m.dataset.share); const r = X.remote.get(m.dataset.share);
+    if (l) m.textContent = shareMeta(l, true); else if (r) m.textContent = shareMeta(r, false);
+  }
+  for (const p of ex.col.querySelectorAll('[data-dl]')) { const st = X.dl.get(p.dataset.dl); if (st) p.textContent = dlText(st); }
+  for (const b of ex.col.querySelectorAll('[data-bar]')) { const st = X.dl.get(b.dataset.bar); if (st) b.style.width = Math.round(st.progress * 100) + '%'; }
+}
+setInterval(xferTick, 1000);
+
+/* ---- xfer ui wiring ---- */
+ex.btnXfer.addEventListener('click', () => {
+  const open = el.app.classList.toggle('xfer-open');
+  ex.btnXfer.textContent = open ? '[CHAT]' : '[XFER]';
+});
+ex.btnPickFolder.addEventListener('click', () => ex.pickFolder.click());
+ex.btnPickFiles.addEventListener('click', () => ex.pickFiles.click());
+ex.pickFolder.addEventListener('change', () => {
+  const fl = ex.pickFolder.files; if (!fl.length) return;
+  const label = (fl[0].webkitRelativePath || '').split('/')[0] || 'folder';
+  shareFiles(fl, label); ex.pickFolder.value = '';
+});
+ex.pickFiles.addEventListener('change', () => {
+  const fl = ex.pickFiles.files; if (!fl.length) return;
+  shareFiles(fl, fl.length === 1 ? fl[0].name : `${fl.length} files`); ex.pickFiles.value = '';
+});
+if (location.hostname === 'localhost' || location.hostname === '127.0.0.1') window.__dmx = { X, shareFiles };
 
 /* ------------------------------------------------------------------ */
 /* boot + access                                                       */
@@ -500,7 +761,7 @@ el.formAccess.addEventListener('submit', async (e) => {
     for (const m of S.history) renderLine(m);
     if (S.history.length) sys(`${S.history.length} MESSAGE(S) RESTORED FROM ENCRYPTED STORE`, 'dim');
     sys(`CHANNEL FINGERPRINT ${S.fp} — compare with peer`, 'dim');
-    el.btnSettings.hidden = false;
+    el.btnSettings.hidden = false; ex.btnXfer.hidden = false;
     showScreen(el.scrTerm);
     scrollBottom();
     S.brokerIdx = 0;

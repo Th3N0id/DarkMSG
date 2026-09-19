@@ -54,9 +54,31 @@ python -c "import hashlib,hmac;c=input('code: ').strip().upper().encode();b=hash
 
 Paste the output into `ACCESS_HASH`, commit, push. Both phones pick up the new code on next load.
 
+## Desktop mode: file transfer (BitTorrent over WebRTC)
+
+On a screen wider than 900 px the terminal splits into chat on the left and **FILE XFER** on the
+right. On a phone, tap `[XFER]` in the header to switch views.
+
+1. **SHARE FOLDER** or **SHARE FILES** picks what to offer. Each file is chunked and AES-256-GCM
+   encrypted in the browser with a fresh random key, then the encrypted chunks are seeded as a
+   torrent (WebTorrent: the BitTorrent protocol over WebRTC data channels, peers found through
+   public WebSocket trackers).
+2. The list of shared files, the torrent infohash, and the decryption key go to your peer over the
+   existing encrypted link. Nobody else gets the key; trackers and any stray peer see only
+   random-looking `0.bin`, `1.bin`, ... blobs.
+3. Your peer sees the share under **PEER SHARES** and taps `[GET]` on a file. The transfer runs
+   computer to computer (STUN/TURN for NAT traversal), shows progress, decrypts, and saves the
+   file. `[SAVE]` re-downloads it if the browser blocked the automatic save.
+4. `[X]` on a local share stops seeding. Closing the tab also stops it.
+
+Transfer limits: everything lives in browser memory, so keep individual files under roughly
+500 MB and shares under 2000 files. The peer list is exchanged only while the chat link is up,
+but a transfer in progress continues even if the chat link drops. Both machines must keep the tab
+open for the duration.
+
 ## Files
 
-`index.html`, `style.css`, `app.js` — the whole app, no build step. `manifest.webmanifest` and the
+`index.html`, `style.css`, `app.js` — the whole app, no build step (MQTT.js and WebTorrent load from CDNs). `manifest.webmanifest` and the
 `icon-*.png` files make it installable. `.nojekyll` keeps GitHub Pages from processing the files.
 
 ## Deploy
