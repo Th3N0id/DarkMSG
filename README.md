@@ -7,8 +7,8 @@ from GitHub Pages. Built for iPhone Safari (add it to the Home Screen), 90's ter
 
 ## How to use
 
-1. Agree on a **long shared passphrase** with your peer (5+ random words). It is the only secret.
-2. Both open the app and enter the passphrase. The header shows `LISTENING` while it waits.
+1. The access code is fixed to **`STEAK`** (case-insensitive). Any other code shows `ACCESS DENIED`.
+2. Both open the app and enter the code. The header shows `LISTENING` while it waits.
 3. When both are online the SYN / SYN-ACK / ACK handshake completes and the header shows
    `LINK ESTABLISHED`. Only then can you send.
 4. Tap `[≡]` to compare the **CHANNEL FP** fingerprint out loud. Same passphrase = same fingerprint.
@@ -33,14 +33,26 @@ from GitHub Pages. Built for iPhone Safari (add it to the Home Screen), 90's ter
 
 - **Both must be online.** The public broker does not store messages for an offline peer. If the
   link is down, sending is disabled.
-- **Passphrase strength is everything.** Anyone can subscribe to the public broker and collect
-  ciphertext, then try passphrases offline. Use a long one.
+- **The access code is the whole secret, and it is short.** Anyone can subscribe to the public
+  broker, collect ciphertext, and try codes offline; a five-letter word falls quickly. Treat the
+  channel as private-from-casual-observers, not as secure against a determined attacker. To harden
+  it, change the code to a long passphrase (below).
 - **Anyone with the passphrase is a peer.** There is no identity beyond the shared secret. If the
   app reports more than one client ID active, one of you reconnected, or someone else has the code.
 - **Public brokers are best-effort.** The app rotates through `broker.emqx.io`, `broker.hivemq.com`
   and `test.mosquitto.org`. Both phones must land on the same relay, so if things look stuck, set
   the same custom relay URL on both phones in settings.
 - iOS suspends background tabs; the app re-dials and re-handshakes when brought back to the front.
+
+## Changing the access code
+
+The app only accepts a code whose verifier matches `ACCESS_HASH` in `app.js`. Compute a new one:
+
+```bash
+python -c "import hashlib,hmac;c=input('code: ').strip().upper().encode();b=hashlib.pbkdf2_hmac('sha256',c,b'DarkMSG-v1',300000,32);p=hmac.new(bytes(32),b,hashlib.sha256).digest();print(hmac.new(p,b'verify\x01',hashlib.sha256).hexdigest())"
+```
+
+Paste the output into `ACCESS_HASH`, commit, push. Both phones pick up the new code on next load.
 
 ## Files
 

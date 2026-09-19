@@ -28,6 +28,9 @@ const MAX_HISTORY     = 500;
 const RESUME_REDIAL_MS = 10000;  // hidden longer than this => full reconnect
 const LS_BROKER       = 'darkmsg.broker';
 const SS_CLIENT_ID    = 'darkmsg.cid';
+// Verifier for the fixed access code (HKDF 'verify' of the PBKDF2 output). Only this code is accepted.
+// To change the code, recompute this with the snippet in README.md.
+const ACCESS_HASH     = 'e6c883f97928206f9a49242c84ddaafd1109fc8cb65a8bac793cf846b6f5058a';
 
 /* ------------------------------------------------------------------ */
 /* utils                                                               */
@@ -466,7 +469,7 @@ async function boot() {
 
 el.formAccess.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const pass = el.pass.value;
+  const pass = el.pass.value.trim().toUpperCase();   // access code is case-insensitive
   if (!pass) return;
   unlockAudio();
   if (!window.crypto || !crypto.subtle) {
@@ -477,6 +480,12 @@ el.formAccess.addEventListener('submit', async (e) => {
   try {
     const base = await deriveBase(pass);
     el.pass.value = '';
+    const verify = hex(await hkdfBits(base, 'verify', 256));
+    if (verify !== ACCESS_HASH) {
+      el.accessMsg.textContent = 'ACCESS DENIED. INVALID CODE.'; el.accessMsg.className = 'err';
+      beep(220, 250);
+      return;
+    }
     S.topic      = TOPIC_PREFIX + hex(await hkdfBits(base, 'topic', 256));
     S.roomKey    = await hkdfAes(base, 'room');
     S.storageKey = await hkdfAes(base, 'storage');
