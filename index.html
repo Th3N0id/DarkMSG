@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>DarkMSG</title>
+<meta name="description" content="Password-protected, end-to-end encrypted two-person terminal.">
+<meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="DarkMSG">
+<meta name="format-detection" content="telephone=no">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" href="icon-180.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=VT323&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="crt" aria-hidden="true"></div>
+
+<div id="app">
+  <header id="hdr">
+    <span class="logo">Dark<span class="logo-b">MSG</span></span>
+    <span id="hdr-status" class="st-off"><i class="led"></i><span id="hdr-status-txt">OFFLINE</span></span>
+    <button id="btn-settings" type="button" aria-label="Settings" hidden>[≡]</button>
+  </header>
+
+  <!-- BOOT -->
+  <section id="scr-boot" class="screen active">
+    <pre id="boot-log" class="log"></pre>
+    <div class="hint">[ tap to skip ]</div>
+  </section>
+
+  <!-- ACCESS -->
+  <section id="scr-access" class="screen">
+    <pre class="ascii" aria-hidden="true">
+ ____             _    __  __ ____   ____
+|  _ \  __ _ _ __| | _|  \/  / ___| / ___|
+| | | |/ _` | '__| |/ / |\/| \___ \| |  _
+| |_| | (_| | |  |   <| |  | |___) | |_| |
+|____/ \__,_|_|  |_|\_\_|  |_|____/ \____|
+</pre>
+    <div class="banner">
+      <div>=== RESTRICTED SYSTEM ===</div>
+      <div class="dim">E2E ENCRYPTED // TWO-PARTY UPLINK // NO LOGS</div>
+    </div>
+    <form id="form-access" autocomplete="off">
+      <label for="passphrase">ENTER ACCESS CODE:</label>
+      <div class="prompt">
+        <span class="ps">&gt;</span>
+        <input id="passphrase" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go" required>
+        <span class="cursor"></span>
+      </div>
+      <button id="btn-auth" type="submit">[ AUTHENTICATE ]</button>
+      <div id="access-msg" class="dim"></div>
+    </form>
+    <div class="foot dim">both parties must enter the same code<br>a long passphrase is your only protection</div>
+  </section>
+
+  <!-- TERMINAL -->
+  <section id="scr-term" class="screen">
+    <div id="hs" class="hs">
+      <span class="step" data-step="syn">SYN</span><span class="arrow">&gt;&gt;&gt;</span>
+      <span class="step" data-step="synack">SYN/ACK</span><span class="arrow">&lt;&lt;&lt;</span>
+      <span class="step" data-step="ack">ACK</span><span class="arrow">&gt;&gt;&gt;</span>
+      <span class="step" data-step="linked">LINK</span>
+    </div>
+    <div id="msgs" class="log" aria-live="polite"></div>
+    <form id="form-send" autocomplete="off">
+      <span class="ps">&gt;</span>
+      <input id="msg-input" type="text" placeholder="waiting for peer..." autocomplete="off" autocorrect="on" autocapitalize="sentences" enterkeyhint="send" maxlength="4000" disabled>
+      <button id="btn-send" type="submit" disabled>SEND</button>
+    </form>
+  </section>
+
+  <!-- SETTINGS DRAWER -->
+  <aside id="settings" hidden>
+    <div class="drawer">
+      <div class="drawer-hd">
+        <span>// CONFIG</span>
+        <button id="btn-settings-close" type="button" aria-label="Close">[X]</button>
+      </div>
+      <dl class="kv">
+        <dt>CHANNEL FP</dt><dd id="cfg-fp">--------</dd>
+        <dt>CLIENT ID</dt><dd id="cfg-id">--------</dd>
+        <dt>RELAY</dt><dd id="cfg-relay">--</dd>
+        <dt>PEER</dt><dd id="cfg-peer">none</dd>
+      </dl>
+      <p class="dim small">Compare CHANNEL FP with your peer out loud. Same code = same fingerprint.</p>
+      <label for="cfg-broker">RELAY URL (wss://)</label>
+      <input id="cfg-broker" type="url" placeholder="wss://broker.emqx.io:8084/mqtt" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <div class="row">
+        <button id="btn-broker-apply" type="button">[ APPLY ]</button>
+        <button id="btn-broker-reset" type="button">[ DEFAULT ]</button>
+      </div>
+      <p class="dim small">Both phones must use the same relay. Defaults rotate through public brokers automatically.</p>
+      <div class="row">
+        <button id="btn-wipe" type="button" class="warn">[ WIPE HISTORY ]</button>
+        <button id="btn-logout" type="button" class="warn">[ LOGOUT ]</button>
+      </div>
+      <p class="dim small">v1.0 // AES-256-GCM // ECDH P-256 // PBKDF2-SHA256</p>
+    </div>
+  </aside>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.16.0/mqtt.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+<script src="app.js"></script>
+</body>
+</html>
